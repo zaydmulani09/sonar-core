@@ -1,0 +1,11 @@
+CONTEXT.md
+PROMPT_ENGINEER_HANDOFF.md
+.env
+.env.*
+.DS_Store
+__pycache__/
+*.pyc
+venv/
+.venv/
+target/
+*.wav
