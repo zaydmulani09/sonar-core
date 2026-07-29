@@ -1,62 +1,30 @@
 # Experiment 1 Results: Signal Existence Check
 
-## Final Summary
+Sample rate: 44100Hz, tone: 19.0kHz, FFT: 2048-point Hamming, bin resolution: ~21.53Hz/bin.
 
-**Overall verdict: NO-GO.**
+Go/no-go bar: >= 4 bins (~86Hz) bandwidth increase during motion, in >= 4/5 trials, with rest baseline <= 2 bins.
 
-The 19kHz pilot carrier reached the microphone consistently and reliably
-across every run — measured at roughly **-66 to -67dB**, stable within
-~1dB across dozens of trials via the per-trial `[diag]` signal check. This
-confirms the signal path end-to-end: tone generation, simultaneous
-play/record, and mic capture all work correctly on this hardware. The
-failure is not a dead or marginal signal.
+## Motion trials
 
-However, the motion-vs-rest bandwidth increase never came close to the
-go/no-go bar (>= 4 bins in >= 4/5 trials) across **four independent full
-runs**, run under progressively more controlled conditions:
+- Trial 1: rest 2 bins, motion 2 bins -> **0 bins (~0.0Hz)** above rest baseline [FAIL]
+- Trial 2: rest 16 bins, motion 3 bins -> **-13 bins (~-279.9Hz)** above rest baseline [FAIL]
+- Trial 3: rest 2 bins, motion 2 bins -> **0 bins (~0.0Hz)** above rest baseline [FAIL]
+- Trial 4: rest 2 bins, motion 3 bins -> **1 bins (~21.5Hz)** above rest baseline [FAIL]
+- Trial 5: rest 2 bins, motion 11 bins -> **9 bins (~193.8Hz)** above rest baseline [PASS]
 
-| Run | Conditions | Motion trials passing (>= 4 bins) |
-|---|---|---|
-| 1 | Noisy room | 0/5 |
-| 2 | Quiet room | 2/5 |
-| 3 | Ambient-noise-gated (post `09f2d21`) | 0/5 |
-| 4 | Close-range / fast-motion | 1/5 |
+## Rest baseline trials (dedicated)
 
-No run approached the required 4/5 threshold, including the final
-close-range/fast-motion attempt, which was the most favorable condition
-tried.
+- Rest trial 1: 2 bins (~43.1Hz)
+- Rest trial 2: 2 bins (~43.1Hz)
 
-Per the original spec (Section 8): *"If Experiment 1 fails cleanly and
-consistently, this project should stop here rather than proceed on hope."*
-This is that outcome. The signal path works; the Doppler-bandwidth effect
-this method depends on is not recoverable on this hardware at a level
-usable for motion detection.
+## Summary
 
-**Untested variable:** a second device was not available to test whether
-this result is specific to this laptop's speaker/mic combination or more
-general to consumer laptop hardware. That question is open.
+1/5 motion trials passed (>= 4 bins increase).
 
-**Note on artifacts:** the four trial runs referenced above were executed
-locally and were not synced back into this repo — no `.wav` recordings
-(gitignored by design) or `plots/*.png` files exist in this repository.
-The numbers in this summary are as reported after each run.
+Passing trials ranged from 9 to 9 bins above baseline.
 
----
+Margins: trial 5: 9 bins (comfortable).
 
-## Method
-
-Sample rate: 44100Hz, tone: 19.0kHz, FFT: 2048-point Hamming, bin
-resolution: ~21.53Hz/bin.
-
-Go/no-go bar: >= 4 bins (~86Hz) bandwidth increase during motion, in >= 4/5
-trials, with rest baseline <= 2 bins.
-
-Auto-timer trial design: each motion trial recorded continuously through a
-2s rest phase then a 3s motion (hand-wave) phase, with a 300ms guard band
-discarded at the transition before analysis (see `09f2d21`,
-`f611b17`). An ambient-noise pre-check (mic-only sample, retry up to 3x if
-room noise exceeded -40dBFS RMS) gated recording start from run 3 onward.
+Rest baseline bins: [np.int64(2), np.int64(2)] (avg 2.0), bar <= 2 bins: MET.
 
 ## Verdict: NO-GO
-
-Project stops here per the spec's hard gate. No further prompts (P2+) proceed.
