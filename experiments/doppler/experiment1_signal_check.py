@@ -49,6 +49,15 @@ PASS_REST_BASELINE_MAX_BINS = 2
 
 SEARCH_HALF_WIDTH_HZ = 500.0
 
+# Half-power (-3dB) threshold is calibrated to the direct path
+# (speaker-to-mic, inches apart on the same chassis), which dominates the
+# peak. The reflected path off a hand is a much weaker sideband, plausibly
+# 20-30dB below the direct peak, and can never cross a -3dB threshold.
+# -25dB is the new default for detecting that weaker reflected signal;
+# -3dB is still computed alongside it for direct comparison.
+THRESHOLD_DB_DOWN = 25
+ORIGINAL_THRESHOLD_DB_DOWN = 3
+
 # -40dBFS RMS default: a quiet room's mic noise floor on typical laptop
 # hardware sits below -50dBFS RMS; -40dBFS leaves headroom above HVAC/fan
 # hum while still catching speech, footsteps, or keyboard clatter that
@@ -148,7 +157,8 @@ def print_signal_diagnostic(segment, fs=FS, n_fft=N_FFT, hop=HOP, label=""):
 
 
 def measure_bandwidth(segment, fs=FS, n_fft=N_FFT, hop=HOP,
-                       target_freq=TONE_FREQ, search_half_width_hz=SEARCH_HALF_WIDTH_HZ):
+                       target_freq=TONE_FREQ, search_half_width_hz=SEARCH_HALF_WIDTH_HZ,
+                       threshold_db_down=THRESHOLD_DB_DOWN):
     freqs, power = avg_power_spectrum(segment, fs, n_fft, hop)
     lo = target_freq - search_half_width_hz
     hi = target_freq + search_half_width_hz
@@ -158,7 +168,7 @@ def measure_bandwidth(segment, fs=FS, n_fft=N_FFT, hop=HOP,
         raise ValueError("search window out of range")
     peak_idx = search_idx[np.argmax(power[search_idx])]
     peak_power = power[peak_idx]
-    threshold = peak_power / 2.0  # -3dB / half-power width
+    threshold = peak_power * 10 ** (-threshold_db_down / 10.0)
 
     search_lo, search_hi = search_idx.min(), search_idx.max()
 
@@ -189,8 +199,12 @@ def run_rest_trial(trial_num):
     countdown("Stay still. Recording starts in:", 3)
     rec = play_record(REST_ONLY_DURATION_S)
     print_signal_diagnostic(rec, label=f"rest trial {trial_num}")
-    result = measure_bandwidth(rec)
-    print(f"Rest trial {trial_num}: {result['bins']} bins (~{result['hz']:.1f}Hz)")
+    result_3db = measure_bandwidth(rec, threshold_db_down=ORIGINAL_THRESHOLD_DB_DOWN)
+    result = measure_bandwidth(rec, threshold_db_down=THRESHOLD_DB_DOWN)
+    result["bins_3db"] = result_3db["bins"]
+    result["hz_3db"] = result_3db["hz"]
+    print(f"Rest trial {trial_num}: bandwidth @ -{ORIGINAL_THRESHOLD_DB_DOWN}dB: {result_3db['bins']} bins "
+          f"(~{result_3db['hz']:.1f}Hz) | @ -{THRESHOLD_DB_DOWN}dB: {result['bins']} bins (~{result['hz']:.1f}Hz)")
     return result
 
 
@@ -208,8 +222,13 @@ def run_motion_trial(trial_num, rest_baseline_avg_bins=None):
     rest_segment = rec[:rest_end]
     motion_segment = rec[motion_start:]
 
-    rest_result = measure_bandwidth(rest_segment)
-    motion_result = measure_bandwidth(motion_segment)
+    rest_result_3db = measure_bandwidth(rest_segment, threshold_db_down=ORIGINAL_THRESHOLD_DB_DOWN)
+    motion_result_3db = measure_bandwidth(motion_segment, threshold_db_down=ORIGINAL_THRESHOLD_DB_DOWN)
+    increase_bins_3db = motion_result_3db["bins"] - rest_result_3db["bins"]
+    increase_hz_3db = increase_bins_3db * BIN_HZ
+
+    rest_result = measure_bandwidth(rest_segment, threshold_db_down=THRESHOLD_DB_DOWN)
+    motion_result = measure_bandwidth(motion_segment, threshold_db_down=THRESHOLD_DB_DOWN)
     increase_bins = motion_result["bins"] - rest_result["bins"]
     increase_hz = increase_bins * BIN_HZ
 
@@ -217,9 +236,11 @@ def run_motion_trial(trial_num, rest_baseline_avg_bins=None):
                and rest_result["bins"] > SUSPECT_REST_MULTIPLIER * rest_baseline_avg_bins)
 
     suffix = "  [SUSPECT: elevated rest-segment noise]" if suspect else ""
-    print(f"Trial {trial_num}: rest {rest_result['bins']} bins, "
-          f"motion {motion_result['bins']} bins -> "
-          f"{increase_bins} bins (~{increase_hz:.1f}Hz) above rest baseline{suffix}")
+    print(f"Trial {trial_num}: bandwidth @ -{ORIGINAL_THRESHOLD_DB_DOWN}dB: "
+          f"rest {rest_result_3db['bins']} bins, motion {motion_result_3db['bins']} bins -> "
+          f"{increase_bins_3db} bins | "
+          f"@ -{THRESHOLD_DB_DOWN}dB: rest {rest_result['bins']} bins, motion {motion_result['bins']} bins -> "
+          f"{increase_bins} bins (~{increase_hz:.1f}Hz){suffix}")
 
     return {
         "trial_num": trial_num,
@@ -227,6 +248,10 @@ def run_motion_trial(trial_num, rest_baseline_avg_bins=None):
         "motion": motion_result,
         "increase_bins": increase_bins,
         "increase_hz": increase_hz,
+        "rest_3db": rest_result_3db,
+        "motion_3db": motion_result_3db,
+        "increase_bins_3db": increase_bins_3db,
+        "increase_hz_3db": increase_hz_3db,
         "suspect": suspect,
     }
 
@@ -281,30 +306,52 @@ def write_results_md(motion_trials, rest_trials, passing, verdict, ambient_log=N
                  f"FFT: {N_FFT}-point Hamming, bin resolution: ~{BIN_HZ:.2f}Hz/bin.\n")
     lines.append(f"Go/no-go bar: >= {PASS_BINS_INCREASE} bins (~{PASS_BINS_INCREASE*BIN_HZ:.0f}Hz) "
                  f"bandwidth increase during motion, in >= {PASS_MIN_MOTION_TRIALS}/{N_MOTION_TRIALS} trials, "
-                 f"with rest baseline <= {PASS_REST_BASELINE_MAX_BINS} bins.\n")
+                 f"with rest baseline <= {PASS_REST_BASELINE_MAX_BINS} bins. Bar is unchanged; only the "
+                 f"threshold used to measure bandwidth has changed.\n")
+
+    lines.append(f"## Threshold note\n")
+    lines.append(f"Bandwidth is measured at two thresholds down from the spectral peak: the original "
+                 f"-{ORIGINAL_THRESHOLD_DB_DOWN}dB (half-power) and the new default -{THRESHOLD_DB_DOWN}dB. "
+                 f"Rationale: the -{ORIGINAL_THRESHOLD_DB_DOWN}dB threshold is calibrated to the peak, which "
+                 f"is dominated by the direct path (speaker-to-mic, inches apart on the same chassis). The "
+                 f"reflected path off a hand is a much weaker sideband, plausibly 20-30dB below the direct "
+                 f"peak, and can never cross a -{ORIGINAL_THRESHOLD_DB_DOWN}dB threshold. Both readings are "
+                 f"reported below for every trial; the go/no-go verdict is evaluated on the "
+                 f"-{THRESHOLD_DB_DOWN}dB reading, with the -{ORIGINAL_THRESHOLD_DB_DOWN}dB verdict shown "
+                 f"alongside for direct comparison.\n")
 
     lines.append("## Motion trials\n")
     for t in motion_trials:
         status = "PASS" if t["increase_bins"] >= PASS_BINS_INCREASE else "FAIL"
+        status_3db = "PASS" if t["increase_bins_3db"] >= PASS_BINS_INCREASE else "FAIL"
         suspect_tag = "  **[SUSPECT: elevated rest-segment noise]**" if t.get("suspect") else ""
-        lines.append(f"- Trial {t['trial_num']}: rest {t['rest']['bins']} bins, "
+        lines.append(f"- Trial {t['trial_num']}: "
+                     f"@ -{ORIGINAL_THRESHOLD_DB_DOWN}dB: rest {t['rest_3db']['bins']} bins, "
+                     f"motion {t['motion_3db']['bins']} bins -> "
+                     f"{t['increase_bins_3db']} bins (~{t['increase_hz_3db']:.1f}Hz) [{status_3db}] | "
+                     f"@ -{THRESHOLD_DB_DOWN}dB: rest {t['rest']['bins']} bins, "
                      f"motion {t['motion']['bins']} bins -> "
-                     f"**{t['increase_bins']} bins (~{t['increase_hz']:.1f}Hz)** above rest baseline "
-                     f"[{status}]{suspect_tag}")
+                     f"**{t['increase_bins']} bins (~{t['increase_hz']:.1f}Hz)** [{status}]{suspect_tag}")
     lines.append("")
 
     lines.append("## Rest baseline trials (dedicated)\n")
     for i, rt in enumerate(rest_trials, 1):
-        lines.append(f"- Rest trial {i}: {rt['bins']} bins (~{rt['hz']:.1f}Hz)")
+        lines.append(f"- Rest trial {i}: @ -{ORIGINAL_THRESHOLD_DB_DOWN}dB: {rt['bins_3db']} bins "
+                     f"(~{rt['hz_3db']:.1f}Hz) | @ -{THRESHOLD_DB_DOWN}dB: {rt['bins']} bins (~{rt['hz']:.1f}Hz)")
     lines.append("")
 
     n_pass = sum(1 for t in motion_trials if t["increase_bins"] >= PASS_BINS_INCREASE)
+    n_pass_3db = sum(1 for t in motion_trials if t["increase_bins_3db"] >= PASS_BINS_INCREASE)
     lines.append("## Summary\n")
-    lines.append(f"{n_pass}/{len(motion_trials)} motion trials passed (>= {PASS_BINS_INCREASE} bins increase).\n")
+    lines.append(f"@ -{THRESHOLD_DB_DOWN}dB: {n_pass}/{len(motion_trials)} motion trials passed "
+                 f"(>= {PASS_BINS_INCREASE} bins increase).\n")
+    lines.append(f"@ -{ORIGINAL_THRESHOLD_DB_DOWN}dB: {n_pass_3db}/{len(motion_trials)} motion trials passed "
+                 f"(>= {PASS_BINS_INCREASE} bins increase).\n")
 
     pass_vals = [t["increase_bins"] for t in motion_trials if t["increase_bins"] >= PASS_BINS_INCREASE]
     if pass_vals:
-        lines.append(f"Passing trials ranged from {min(pass_vals)} to {max(pass_vals)} bins above baseline.\n")
+        lines.append(f"Passing trials ranged from {min(pass_vals)} to {max(pass_vals)} bins above baseline "
+                     f"(@ -{THRESHOLD_DB_DOWN}dB).\n")
         margin_notes = []
         for t in motion_trials:
             if t["increase_bins"] >= PASS_BINS_INCREASE:
@@ -313,10 +360,18 @@ def write_results_md(motion_trials, rest_trials, passing, verdict, ambient_log=N
         lines.append("Margins: " + "; ".join(margin_notes) + ".\n")
 
     rest_bins_vals = [rt["bins"] for rt in rest_trials]
+    rest_bins_vals_3db = [rt["bins_3db"] for rt in rest_trials]
     rest_avg = np.mean(rest_bins_vals) if rest_bins_vals else float("nan")
+    rest_avg_3db = np.mean(rest_bins_vals_3db) if rest_bins_vals_3db else float("nan")
     rest_ok = all(b <= PASS_REST_BASELINE_MAX_BINS for b in rest_bins_vals) if rest_bins_vals else False
-    lines.append(f"Rest baseline bins: {rest_bins_vals} (avg {rest_avg:.1f}), "
+    rest_ok_3db = all(b <= PASS_REST_BASELINE_MAX_BINS for b in rest_bins_vals_3db) if rest_bins_vals_3db else False
+    lines.append(f"Rest baseline bins @ -{THRESHOLD_DB_DOWN}dB: {rest_bins_vals} (avg {rest_avg:.1f}), "
                  f"bar <= {PASS_REST_BASELINE_MAX_BINS} bins: {'MET' if rest_ok else 'NOT MET'}.\n")
+    lines.append(f"Rest baseline bins @ -{ORIGINAL_THRESHOLD_DB_DOWN}dB: {rest_bins_vals_3db} "
+                 f"(avg {rest_avg_3db:.1f}), "
+                 f"bar <= {PASS_REST_BASELINE_MAX_BINS} bins: {'MET' if rest_ok_3db else 'NOT MET'}.\n")
+
+    verdict_3db = "GO" if (n_pass_3db >= PASS_MIN_MOTION_TRIALS and rest_ok_3db) else "NO-GO"
 
     lines.append("## Data quality\n")
     retry_count = sum(1 for a in ambient_log if a["attempts"] > 1 or not a["passed"])
@@ -339,7 +394,10 @@ def write_results_md(motion_trials, rest_trials, passing, verdict, ambient_log=N
                          f"final {a['final_db']:.1f}dB [{status}]")
     lines.append("")
 
-    lines.append(f"## Verdict: {verdict}\n")
+    lines.append(f"## Verdict\n")
+    lines.append(f"VERDICT (at -{THRESHOLD_DB_DOWN}dB threshold): {verdict}\n")
+    lines.append(f"For comparison — VERDICT (at -{ORIGINAL_THRESHOLD_DB_DOWN}dB threshold, original): "
+                 f"{verdict_3db}\n")
 
     RESULTS_MD.write_text("\n".join(lines), encoding="utf-8")
     return RESULTS_MD
@@ -378,9 +436,17 @@ def main():
     rest_ok = all(rt["bins"] <= PASS_REST_BASELINE_MAX_BINS for rt in rest_trials)
     verdict = "GO" if (n_pass >= PASS_MIN_MOTION_TRIALS and rest_ok) else "NO-GO"
 
+    n_pass_3db = sum(1 for t in motion_trials if t["increase_bins_3db"] >= PASS_BINS_INCREASE)
+    rest_ok_3db = all(rt["bins_3db"] <= PASS_REST_BASELINE_MAX_BINS for rt in rest_trials)
+    verdict_3db = "GO" if (n_pass_3db >= PASS_MIN_MOTION_TRIALS and rest_ok_3db) else "NO-GO"
+
     print(f"\n{'='*50}")
-    print(f"VERDICT: {verdict} ({n_pass}/{N_MOTION_TRIALS} motion trials passed, "
+    print(f"VERDICT (at -{THRESHOLD_DB_DOWN}dB threshold): {verdict} "
+          f"({n_pass}/{N_MOTION_TRIALS} motion trials passed, "
           f"rest baseline bar {'met' if rest_ok else 'NOT met'})")
+    print(f"For comparison — VERDICT (at -{ORIGINAL_THRESHOLD_DB_DOWN}dB threshold, original): {verdict_3db} "
+          f"({n_pass_3db}/{N_MOTION_TRIALS} motion trials passed, "
+          f"rest baseline bar {'met' if rest_ok_3db else 'NOT met'})")
     print(f"{'='*50}")
 
     results_path = write_results_md(motion_trials, rest_trials, n_pass, verdict, ambient_log=AMBIENT_LOG)
