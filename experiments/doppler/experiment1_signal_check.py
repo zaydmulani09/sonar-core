@@ -92,6 +92,21 @@ def avg_power_spectrum(segment, fs=FS, n_fft=N_FFT, hop=HOP):
     return freqs, power
 
 
+def print_signal_diagnostic(segment, fs=FS, n_fft=N_FFT, hop=HOP, label=""):
+    """Raw power at the 19kHz carrier vs. a 1kHz reference bin, independent
+    of any bandwidth logic. Tells us if the tone reaches the mic at all."""
+    freqs, power = avg_power_spectrum(segment, fs, n_fft, hop)
+    carrier_idx = np.argmin(np.abs(freqs - TONE_FREQ))
+    ref_idx = np.argmin(np.abs(freqs - 1000.0))
+    carrier_db = 10 * np.log10(power[carrier_idx] + 1e-20)
+    ref_db = 10 * np.log10(power[ref_idx] + 1e-20)
+    print(f"  [diag{' ' + label if label else ''}] "
+          f"19kHz bin ({freqs[carrier_idx]:.0f}Hz): {carrier_db:.1f}dB | "
+          f"1kHz ref bin ({freqs[ref_idx]:.0f}Hz): {ref_db:.1f}dB | "
+          f"delta: {carrier_db - ref_db:+.1f}dB")
+    return carrier_db, ref_db
+
+
 def measure_bandwidth(segment, fs=FS, n_fft=N_FFT, hop=HOP,
                        target_freq=TONE_FREQ, search_half_width_hz=SEARCH_HALF_WIDTH_HZ):
     freqs, power = avg_power_spectrum(segment, fs, n_fft, hop)
@@ -105,11 +120,13 @@ def measure_bandwidth(segment, fs=FS, n_fft=N_FFT, hop=HOP,
     peak_power = power[peak_idx]
     threshold = peak_power / 2.0  # -3dB / half-power width
 
+    search_lo, search_hi = search_idx.min(), search_idx.max()
+
     left = peak_idx
-    while left > 0 and power[left - 1] >= threshold:
+    while left > search_lo and power[left - 1] >= threshold:
         left -= 1
     right = peak_idx
-    while right < len(power) - 1 and power[right + 1] >= threshold:
+    while right < search_hi and power[right + 1] >= threshold:
         right += 1
 
     bandwidth_bins = right - left + 1
@@ -130,6 +147,7 @@ def run_rest_trial(trial_num):
     print(f"\n=== Rest baseline trial {trial_num} ===")
     countdown("Stay still. Recording starts in:", 3)
     rec = play_record(REST_ONLY_DURATION_S)
+    print_signal_diagnostic(rec, label=f"rest trial {trial_num}")
     result = measure_bandwidth(rec)
     print(f"Rest trial {trial_num}: {result['bins']} bins (~{result['hz']:.1f}Hz)")
     return result
@@ -140,6 +158,7 @@ def run_motion_trial(trial_num):
     print(f"Stay still for {REST_S:.0f}s, then wave your hand near the laptop for {MOTION_S:.0f}s.")
     countdown("Recording starts in:", 3)
     rec = play_record(TRIAL_DURATION_S)
+    print_signal_diagnostic(rec, label=f"motion trial {trial_num} (full recording)")
 
     rest_end = int((REST_S - BUFFER_S) * FS)
     motion_start = int((REST_S + BUFFER_S) * FS)
